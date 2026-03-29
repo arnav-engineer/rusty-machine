@@ -1,0 +1,30 @@
+# Build artifacts
+target/
+src/kernels.ptx
+.wsl_cuda
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Project-specific
+*.db
+.web/
+.states
+assets/
+documents/

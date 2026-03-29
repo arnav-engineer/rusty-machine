@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rusty_machine"
+requires-python = ">=3.10"
+description = "GPU-accelerated machine learning in Rust with Python bindings, powered by CUDA"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Arnav Gupta", email = "arnav.gupta.9404@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+]
+dynamic = ["version"]
+
+dependencies = [
+    "numpy>=1.21",
+    "cupy-cuda12x>=12.0",
+    "scikit-learn>=1.4",
+    "streamlit>=1.30",
+    "altair>=5.0",
+    "pandas>=2.0",
+    "codecarbon>=3.2.5",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
