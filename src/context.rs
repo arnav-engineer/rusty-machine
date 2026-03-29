@@ -1,6 +1,6 @@
 use cust::prelude::*;
 use pyo3::prelude::*;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, Mutex};
 use std::os::raw::c_void;
 
 use crate::ffi;
@@ -10,11 +10,11 @@ pub fn to_py_err<E: std::fmt::Display>(e: E) -> PyErr {
 }
 
 // Thread-safe handle wrappers
-pub struct SyncCublasHandle(pub ffi::CublasHandle);
+pub struct SyncCublasHandle(pub Mutex<ffi::CublasHandle>);
 unsafe impl Send for SyncCublasHandle {}
 unsafe impl Sync for SyncCublasHandle {}
 
-pub struct SyncCusolverHandle(pub ffi::CusolverDnHandle);
+pub struct SyncCusolverHandle(pub Mutex<ffi::CusolverDnHandle>);
 unsafe impl Send for SyncCusolverHandle {}
 unsafe impl Sync for SyncCusolverHandle {}
 
@@ -29,8 +29,8 @@ pub struct GpuContext {
 impl Drop for GpuContext {
     fn drop(&mut self) {
         unsafe {
-            ffi::cublasDestroy_v2(self.cublas_handle.0);
-            ffi::cusolverDnDestroy(self.cusolver_handle.0);
+            ffi::cublasDestroy_v2(*self.cublas_handle.0.lock().unwrap());
+            ffi::cusolverDnDestroy(*self.cusolver_handle.0.lock().unwrap());
         }
     }
 }
@@ -63,8 +63,8 @@ pub fn get_gpu_context() -> PyResult<&'static GpuContext> {
 
         Ok(GpuContext {
             _ctx: ctx, stream, module,
-            cublas_handle: SyncCublasHandle(cublas_handle),
-            cusolver_handle: SyncCusolverHandle(cusolver_handle),
+            cublas_handle: SyncCublasHandle(Mutex::new(cublas_handle)),
+            cusolver_handle: SyncCusolverHandle(Mutex::new(cusolver_handle)),
         })
     })();
     match created {

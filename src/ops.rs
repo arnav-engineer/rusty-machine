@@ -37,11 +37,15 @@ pub fn gpu_inverse(a_ptr: u64, inv_ptr: u64, n: usize) -> PyResult<()> {
     let inv_dev_temp = DeviceBuffer::from_slice(&identity).map_err(to_py_err)?;
 
     unsafe {
-        let handle = ctx.cusolver_handle.0;
+        let handle = *ctx.cusolver_handle.0.lock().unwrap();
         let ipiv_dev = DeviceBuffer::<c_int>::uninitialized(n).map_err(to_py_err)?;
         let info_dev = DeviceBuffer::<c_int>::uninitialized(1).map_err(to_py_err)?;
         let mut lwork: c_int = 0;
-        let a_dev_ptr = a_ptr as *mut f32;
+        
+        let mut a_dev_temp = DeviceBuffer::<f32>::uninitialized(n * n).map_err(to_py_err)?;
+        let a_slice = cust::memory::DeviceSlice::from_raw_parts(device_ptr_from_u64(a_ptr), n * n);
+        a_dev_temp.copy_from(&a_slice).map_err(to_py_err)?;
+        let a_dev_ptr = a_dev_temp.as_raw_ptr() as *mut f32;
 
         crate::cuda_check!(ffi::cusolverDnSgetrf_bufferSize(handle, n as c_int, n as c_int, a_dev_ptr, n as c_int, &mut lwork), "Sgetrf_bufferSize");
         let work_dev = DeviceBuffer::<f32>::uninitialized(lwork as usize).map_err(to_py_err)?;
@@ -67,8 +71,8 @@ pub fn solve_normal_equation_device(
     let ctx = get_gpu_context()?;
     let one = 1.0f32;
     let zero = 0.0f32;
-    let handle_blas = ctx.cublas_handle.0;
-    let handle_solver = ctx.cusolver_handle.0;
+    let handle_blas = *ctx.cublas_handle.0.lock().unwrap();
+    let handle_solver = *ctx.cusolver_handle.0.lock().unwrap();
     let f = features as i32;
     let s = samples as i32;
     let stream = &ctx.stream;
@@ -146,7 +150,7 @@ pub fn gpu_predict(
     unsafe {
         // out = Xᵀ_col · coef  (row-major X viewed as col-major Xᵀ)
         crate::cuda_check!(ffi::cublasSgemv_v2(
-            ctx.cublas_handle.0, ffi::CUBLAS_OP_T,
+            *ctx.cublas_handle.0.lock().unwrap(), ffi::CUBLAS_OP_T,
             features as i32, samples as i32, &one,
             x_ptr as *const c_void, features as i32,
             coef_ptr as *const c_void, 1,
@@ -209,64 +213,48 @@ pub fn train_logistic_minibatch_gpu(
     let upd_block = 256u32;
     let upd_grid = (features as u32 + upd_block - 1) / upd_block;
 
-    let mut graph: *mut c_void = std::ptr::null_mut();
-    let mut graph_exec: *mut c_void = std::ptr::null_mut();
+    let handle_blas = *ctx.cublas_handle.0.lock().unwrap();
 
     unsafe {
-        crate::cuda_check!(ffi::cuStreamBeginCapture_v2(stream.as_inner() as *mut c_void, 0), "cuStreamBeginCapture");
+        for _e in 0..epochs {
+            for i in 0..num_batches {
+                let bs = if i == num_batches - 1 { samples - i * batch_size } else { batch_size };
+                let bs_i32 = bs as i32;
+                let x_batch = x_dev_ptr.offset((i * batch_size * features) as isize);
+                let y_batch = y_dev_ptr.offset((i * batch_size) as isize);
 
-        for i in 0..num_batches {
-            let bs = if i == num_batches - 1 { samples - i * batch_size } else { batch_size };
-            let bs_i32 = bs as i32;
-            let x_batch = x_dev_ptr.offset((i * batch_size * features) as isize);
-            let y_batch = y_dev_ptr.offset((i * batch_size) as isize);
+                // z = X_batch · θ  using SGEMM to unlock Tensor Cores
+                crate::cuda_check!(ffi::cublasSgemm_v2(
+                    handle_blas, ffi::CUBLAS_OP_T, ffi::CUBLAS_OP_N,
+                    bs_i32, 1, f, &one,
+                    x_batch.as_raw() as *const c_void, f,
+                    theta_dev_ptr.as_raw() as *const c_void, f,
+                    &zero, z_dev.as_device_ptr().as_raw() as *mut c_void, bs_i32
+                ), "SGEMM z");
 
-            // z = X_batch · θ  using SGEMM to unlock Tensor Cores
-            crate::cuda_check!(ffi::cublasSgemm_v2(
-                ctx.cublas_handle.0, ffi::CUBLAS_OP_T, ffi::CUBLAS_OP_N,
-                bs_i32, 1, f, &one,
-                x_batch.as_raw() as *const c_void, f,
-                theta_dev_ptr.as_raw() as *const c_void, f,
-                &zero, z_dev.as_device_ptr().as_raw() as *mut c_void, bs_i32
-            ), "SGEMM z");
+                // error = sigmoid(z) - y
+                let sig_grid = (bs as u32 + sig_block - 1) / sig_block;
+                cust::launch!(fused_sigmoid_sub_f<<<sig_grid, sig_block, 0, stream>>>(
+                    z_dev.as_device_ptr(), y_batch, error_dev.as_device_ptr(), bs_i32
+                )).map_err(to_py_err)?;
 
-            // error = sigmoid(z) - y
-            let sig_grid = (bs as u32 + sig_block - 1) / sig_block;
-            cust::launch!(fused_sigmoid_sub_f<<<sig_grid, sig_block, 0, stream>>>(
-                z_dev.as_device_ptr(), y_batch, error_dev.as_device_ptr(), bs_i32
-            )).map_err(to_py_err)?;
+                // grad = X_batchᵀ · error  using SGEMM to unlock Tensor Cores
+                crate::cuda_check!(ffi::cublasSgemm_v2(
+                    handle_blas, ffi::CUBLAS_OP_N, ffi::CUBLAS_OP_N,
+                    f, 1, bs_i32, &one,
+                    x_batch.as_raw() as *const c_void, f,
+                    error_dev.as_device_ptr().as_raw() as *const c_void, bs_i32,
+                    &zero, grad_dev.as_device_ptr().as_raw() as *mut c_void, f
+                ), "SGEMM grad");
 
-            // grad = X_batchᵀ · error  using SGEMM to unlock Tensor Cores
-            crate::cuda_check!(ffi::cublasSgemm_v2(
-                ctx.cublas_handle.0, ffi::CUBLAS_OP_N, ffi::CUBLAS_OP_N,
-                f, 1, bs_i32, &one,
-                x_batch.as_raw() as *const c_void, f,
-                error_dev.as_device_ptr().as_raw() as *const c_void, bs_i32,
-                &zero, grad_dev.as_device_ptr().as_raw() as *mut c_void, f
-            ), "SGEMM grad");
-
-            // update θ with gradient + regularization + momentum
-            cust::launch!(reg_update_f<<<upd_grid, upd_block, 0, stream>>>(
-                theta_dev_ptr, velocity_dev_ptr,
-                grad_dev.as_device_ptr(),
-                lr, alpha_reg, momentum, f, bs_i32
-            )).map_err(to_py_err)?;
+                // update θ with gradient + regularization + momentum
+                cust::launch!(reg_update_f<<<upd_grid, upd_block, 0, stream>>>(
+                    theta_dev_ptr, velocity_dev_ptr,
+                    grad_dev.as_device_ptr(),
+                    lr, alpha_reg, momentum, f, bs_i32
+                )).map_err(to_py_err)?;
+            }
         }
-
-        crate::cuda_check!(ffi::cuStreamEndCapture(stream.as_inner() as *mut c_void, &mut graph), "cuStreamEndCapture");
-        crate::cuda_check!(ffi::cuGraphInstantiate_v2(&mut graph_exec, graph, std::ptr::null_mut(), std::ptr::null_mut(), 0), "cuGraphInstantiate");
-    }
-
-    // Fire the entire compiled epoch graph sequentially
-    for _e in 0..epochs {
-        unsafe {
-            crate::cuda_check!(ffi::cuGraphLaunch(graph_exec, stream.as_inner() as *mut c_void), "cuGraphLaunch");
-        }
-    }
-
-    unsafe {
-        ffi::cuGraphExecDestroy(graph_exec);
-        ffi::cuGraphDestroy(graph);
     }
 
     ctx.stream.synchronize().map_err(to_py_err)?;

@@ -86,12 +86,23 @@ class LinearRegression:
         return self
 
     def predict(self, X):
-        """Predict on CPU, return NumPy array."""
+        """Predict class values on GPU."""
         if self.coef_ is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
-        X_np = cp.asnumpy(X) if isinstance(X, cp.ndarray) else np.asarray(X, dtype=np.float32)
-        return (X_np @ self.coef_) + self.intercept_
+        X_gpu_raw = cp.asarray(X, dtype=cp.float32)
+        samples, features = X_gpu_raw.shape
+        out_gpu = cp.empty(samples, dtype=cp.float32)
+
+        X_gpu_ptr, _X_guard = _safe_ptr(X_gpu_raw)
+        coef_gpu_ptr, _coef_guard = _safe_ptr(self._coef_gpu)
+        out_gpu_ptr, _out_guard = _safe_ptr(out_gpu)
+
+        rusty_machine.gpu_predict(
+            X_gpu_ptr, coef_gpu_ptr, out_gpu_ptr,
+            samples, features, float(self.intercept_), False
+        )
+        return cp.asnumpy(out_gpu)
 
 
 class LogisticRegression:
@@ -186,25 +197,29 @@ class LogisticRegression:
         return self
 
     def predict_proba(self, X):
-        """Predict class probabilities on CPU. Returns (n, 2) array."""
+        """Predict class probabilities on GPU. Returns (n, 2) array."""
         if self.coef_ is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
-        X_np = cp.asnumpy(X) if isinstance(X, cp.ndarray) else np.asarray(X, dtype=np.float32)
-        
-        z = (X_np @ self.coef_) + self.intercept_
-        # Avoid overflow in exponential
-        np.clip(z, -709.0, 709.0, out=z)
-        probs = 1.0 / (1.0 + np.exp(-z))
-        probs = probs.astype(np.float32)
-        
-        return np.column_stack([1 - probs, probs])
+        X_gpu_raw = cp.asarray(X, dtype=cp.float32)
+        samples, features = X_gpu_raw.shape
+        out_gpu = cp.empty(samples, dtype=cp.float32)
+
+        X_gpu_ptr, _X_guard = _safe_ptr(X_gpu_raw)
+        coef_gpu_ptr, _coef_guard = _safe_ptr(self._coef_gpu)
+        out_gpu_ptr, _out_guard = _safe_ptr(out_gpu)
+
+        rusty_machine.gpu_predict(
+            X_gpu_ptr, coef_gpu_ptr, out_gpu_ptr,
+            samples, features, float(self.intercept_), True
+        )
+        probs = cp.asnumpy(out_gpu)
+        return np.column_stack([1.0 - probs, probs])
 
     def predict(self, X):
-        """Predict class labels (0/1) on CPU."""
+        """Predict class labels (0/1) on GPU."""
         if self.coef_ is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
             
-        X_np = cp.asnumpy(X) if isinstance(X, cp.ndarray) else np.asarray(X, dtype=np.float32)
-        z = (X_np @ self.coef_) + self.intercept_
-        return (z > 0).astype(np.int32)
+        probs = self.predict_proba(X)[:, 1]
+        return (probs > 0.5).astype(np.int32)
