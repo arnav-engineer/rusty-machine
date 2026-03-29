@@ -196,8 +196,8 @@ class LogisticRegression:
         self._coef_gpu = cp.asarray(self.coef_)
         return self
 
-    def predict_proba(self, X):
-        """Predict class probabilities on GPU. Returns (n, 2) array."""
+    def _forward_gpu(self, X, apply_sigmoid):
+        """Internal helper to evaluate the linear forward pass cleanly."""
         if self.coef_ is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
@@ -211,15 +211,16 @@ class LogisticRegression:
 
         rusty_machine.gpu_predict(
             X_gpu_ptr, coef_gpu_ptr, out_gpu_ptr,
-            samples, features, float(self.intercept_), True
+            samples, features, float(self.intercept_), apply_sigmoid
         )
-        probs = cp.asnumpy(out_gpu)
+        return cp.asnumpy(out_gpu)
+
+    def predict_proba(self, X):
+        """Predict class probabilities on GPU. Returns (n, 2) array."""
+        probs = self._forward_gpu(X, True)
         return np.column_stack([1.0 - probs, probs])
 
     def predict(self, X):
-        """Predict class labels (0/1) on GPU."""
-        if self.coef_ is None:
-            raise RuntimeError("Model not fitted. Call fit() first.")
-            
-        probs = self.predict_proba(X)[:, 1]
-        return (probs > 0.5).astype(np.int32)
+        """Predict class labels (0/1) directly on GPU without sigmoid overhead."""
+        z = self._forward_gpu(X, False)
+        return (z > 0).astype(np.int32)

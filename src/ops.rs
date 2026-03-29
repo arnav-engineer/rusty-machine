@@ -37,7 +37,8 @@ pub fn gpu_inverse(a_ptr: u64, inv_ptr: u64, n: usize) -> PyResult<()> {
     let inv_dev_temp = DeviceBuffer::from_slice(&identity).map_err(to_py_err)?;
 
     unsafe {
-        let handle = *ctx.cusolver_handle.0.lock().unwrap();
+        let handle_guard = ctx.cusolver_handle.0.lock().unwrap();
+        let handle = *handle_guard;
         let ipiv_dev = DeviceBuffer::<c_int>::uninitialized(n).map_err(to_py_err)?;
         let info_dev = DeviceBuffer::<c_int>::uninitialized(1).map_err(to_py_err)?;
         let mut lwork: c_int = 0;
@@ -71,8 +72,10 @@ pub fn solve_normal_equation_device(
     let ctx = get_gpu_context()?;
     let one = 1.0f32;
     let zero = 0.0f32;
-    let handle_blas = *ctx.cublas_handle.0.lock().unwrap();
-    let handle_solver = *ctx.cusolver_handle.0.lock().unwrap();
+    let handle_blas_guard = ctx.cublas_handle.0.lock().unwrap();
+    let handle_blas = *handle_blas_guard;
+    let handle_solver_guard = ctx.cusolver_handle.0.lock().unwrap();
+    let handle_solver = *handle_solver_guard;
     let f = features as i32;
     let s = samples as i32;
     let stream = &ctx.stream;
@@ -148,9 +151,10 @@ pub fn gpu_predict(
     let zero = 0.0f32;
 
     unsafe {
+        let handle_blas_guard = ctx.cublas_handle.0.lock().unwrap();
         // out = Xᵀ_col · coef  (row-major X viewed as col-major Xᵀ)
         crate::cuda_check!(ffi::cublasSgemv_v2(
-            *ctx.cublas_handle.0.lock().unwrap(), ffi::CUBLAS_OP_T,
+            *handle_blas_guard, ffi::CUBLAS_OP_T,
             features as i32, samples as i32, &one,
             x_ptr as *const c_void, features as i32,
             coef_ptr as *const c_void, 1,
@@ -213,7 +217,8 @@ pub fn train_logistic_minibatch_gpu(
     let upd_block = 256u32;
     let upd_grid = (features as u32 + upd_block - 1) / upd_block;
 
-    let handle_blas = *ctx.cublas_handle.0.lock().unwrap();
+    let handle_blas_guard = ctx.cublas_handle.0.lock().unwrap();
+    let handle_blas = *handle_blas_guard;
 
     unsafe {
         for _e in 0..epochs {
