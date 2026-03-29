@@ -19,17 +19,14 @@ def _safe_ptr(arr):
 
 def _to_gpu_fast(arr):
     """
-    Safely stream host arrays to the GPU using Pinned Memory asynchronously.
+    Safely stream host arrays to the GPU.
+    Native `cp.asarray` utilizes optimized C++ memory pools in the background.
+    Manually allocating raw pinned memory dynamically introduces severe OS-level page-locking latency.
     """
     if isinstance(arr, cp.ndarray):
+        arr = cp.ascontiguousarray(arr, dtype=cp.float32)
         return arr
-    arr = np.ascontiguousarray(arr, dtype=np.float32)
-    pinned_mem = cp.cuda.alloc_pinned_memory(arr.nbytes)
-    pinned_host = np.frombuffer(pinned_mem, dtype=arr.dtype, count=arr.size).reshape(arr.shape)
-    pinned_host[...] = arr
-    gpu_arr = cp.empty_like(arr)
-    gpu_arr.set(pinned_host)
-    return gpu_arr
+    return cp.ascontiguousarray(cp.asarray(arr, dtype=cp.float32))
 
 def _check_gpu_memory(required_bytes):
     """
@@ -193,6 +190,14 @@ class LogisticRegression:
 
         X_b_padded, features_padded = _pad_for_tensor_cores(X_b)
         samples = X_b_padded.shape[0]
+
+        # Statically pad samples so CUDA Graphs can be instantiated without variable batches
+        remainder = samples % self.batch_size
+        if remainder != 0:
+            samples_pad = self.batch_size - remainder
+            X_b_padded = cp.pad(X_b_padded, ((0, samples_pad), (0, 0)), mode='constant')
+            y_gpu_raw = cp.pad(y_gpu_raw, (0, samples_pad), mode='constant')
+            samples = X_b_padded.shape[0]
 
         # Shuffle data entirely on GPU VRAM using incredibly high bandwidth
         perm = cp.random.permutation(samples)

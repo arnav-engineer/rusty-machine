@@ -220,46 +220,59 @@ pub fn train_logistic_minibatch_gpu(
 
         let handle_blas = ctx.cublas_handle;
 
+        let mut graph: *mut c_void = std::ptr::null_mut();
+        let mut graph_exec: *mut c_void = std::ptr::null_mut();
+
         unsafe {
-            for _e in 0..epochs {
-                for i in 0..num_batches {
-                    let bs = if i == num_batches - 1 { samples - i * batch_size } else { batch_size };
-                    let bs_i32 = bs as i32;
-                    let x_batch = x_dev_ptr.offset((i * batch_size * features) as isize);
-                    let y_batch = y_dev_ptr.offset((i * batch_size) as isize);
+            crate::cuda_check!(ffi::cuStreamBeginCapture_v2(stream.as_inner() as *mut c_void, 0), "cuStreamBeginCapture");
 
-                    // z = X_batch · θ  using SGEMM to unlock Tensor Cores
-                    crate::cuda_check!(ffi::cublasSgemm_v2(
-                        handle_blas, ffi::CUBLAS_OP_T, ffi::CUBLAS_OP_N,
-                        bs_i32, 1, f, &one,
-                        x_batch.as_raw() as *const c_void, f,
-                        theta_dev_ptr.as_raw() as *const c_void, f,
-                        &zero, z_dev.as_device_ptr().as_raw() as *mut c_void, bs_i32
-                    ), "SGEMM z");
+            for i in 0..num_batches {
+                let bs = batch_size;
+                let bs_i32 = bs as i32;
+                let x_batch = x_dev_ptr.offset((i * batch_size * features) as isize);
+                let y_batch = y_dev_ptr.offset((i * batch_size) as isize);
 
-                    // error = sigmoid(z) - y
-                    let sig_grid = (bs as u32 + sig_block - 1) / sig_block;
-                    cust::launch!(fused_sigmoid_sub_f<<<sig_grid, sig_block, 0, stream>>>(
-                        z_dev.as_device_ptr(), y_batch, error_dev.as_device_ptr(), bs_i32
-                    )).map_err(to_py_err)?;
+                // z = X_batch · θ
+                crate::cuda_check!(ffi::cublasSgemm_v2(
+                    handle_blas, ffi::CUBLAS_OP_T, ffi::CUBLAS_OP_N,
+                    bs_i32, 1, f, &one,
+                    x_batch.as_raw() as *const c_void, f,
+                    theta_dev_ptr.as_raw() as *const c_void, f,
+                    &zero, z_dev.as_device_ptr().as_raw() as *mut c_void, bs_i32
+                ), "SGEMM z");
 
-                    // grad = X_batchᵀ · error  using SGEMM to unlock Tensor Cores
-                    crate::cuda_check!(ffi::cublasSgemm_v2(
-                        handle_blas, ffi::CUBLAS_OP_N, ffi::CUBLAS_OP_N,
-                        f, 1, bs_i32, &one,
-                        x_batch.as_raw() as *const c_void, f,
-                        error_dev.as_device_ptr().as_raw() as *const c_void, bs_i32,
-                        &zero, grad_dev.as_device_ptr().as_raw() as *mut c_void, f
-                    ), "SGEMM grad");
+                // error = sigmoid(z) - y
+                let sig_grid = (bs as u32 + sig_block - 1) / sig_block;
+                cust::launch!(fused_sigmoid_sub_f<<<sig_grid, sig_block, 0, stream>>>(
+                    z_dev.as_device_ptr(), y_batch, error_dev.as_device_ptr(), bs_i32
+                )).map_err(to_py_err)?;
 
-                    // update θ with gradient + regularization + momentum
-                    cust::launch!(reg_update_f<<<upd_grid, upd_block, 0, stream>>>(
-                        theta_dev_ptr, velocity_dev_ptr,
-                        grad_dev.as_device_ptr(),
-                        lr, alpha_reg, momentum, f, bs_i32, intercept_idx as i32
-                    )).map_err(to_py_err)?;
-                }
+                // grad = X_batchᵀ · error
+                crate::cuda_check!(ffi::cublasSgemm_v2(
+                    handle_blas, ffi::CUBLAS_OP_N, ffi::CUBLAS_OP_N,
+                    f, 1, bs_i32, &one,
+                    x_batch.as_raw() as *const c_void, f,
+                    error_dev.as_device_ptr().as_raw() as *const c_void, bs_i32,
+                    &zero, grad_dev.as_device_ptr().as_raw() as *mut c_void, f
+                ), "SGEMM grad");
+
+                // update θ
+                cust::launch!(reg_update_f<<<upd_grid, upd_block, 0, stream>>>(
+                    theta_dev_ptr, velocity_dev_ptr,
+                    grad_dev.as_device_ptr(),
+                    lr, alpha_reg, momentum, f, bs_i32, intercept_idx as i32
+                )).map_err(to_py_err)?;
             }
+
+            crate::cuda_check!(ffi::cuStreamEndCapture(stream.as_inner() as *mut c_void, &mut graph), "cuStreamEndCapture");
+            crate::cuda_check!(ffi::cuGraphInstantiate_v2(&mut graph_exec, graph, std::ptr::null_mut(), std::ptr::null_mut(), 0), "cuGraphInstantiate");
+
+            for _e in 0..epochs {
+                crate::cuda_check!(ffi::cuGraphLaunch(graph_exec, stream.as_inner() as *mut c_void), "cuGraphLaunch");
+            }
+
+            ffi::cuGraphExecDestroy(graph_exec);
+            ffi::cuGraphDestroy(graph);
         }
 
         ctx.stream.synchronize().map_err(to_py_err)?;
