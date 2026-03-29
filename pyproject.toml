@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "rusty_machine"
 requires-python = ">=3.10"
 description = "GPU-accelerated machine learning in Rust with Python bindings, powered by CUDA"
-readme = "README.md"
+readme = "paper_guide.md"
 license = { text = "MIT" }
 authors = [
     { name = "Arnav Gupta", email = "arnav.gupta.9404@gmail.com" },

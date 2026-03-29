@@ -17,6 +17,20 @@ def _safe_ptr(arr):
     arr = cp.ascontiguousarray(arr, dtype=np.float32)
     return arr.data.ptr, arr
 
+def _to_gpu_fast(arr):
+    """
+    Safely stream host arrays to the GPU using Pinned Memory asynchronously.
+    """
+    if isinstance(arr, cp.ndarray):
+        return arr
+    arr = np.ascontiguousarray(arr, dtype=np.float32)
+    pinned_mem = cp.cuda.alloc_pinned_memory(arr.nbytes)
+    pinned_host = np.frombuffer(pinned_mem, dtype=arr.dtype, count=arr.size).reshape(arr.shape)
+    pinned_host[...] = arr
+    gpu_arr = cp.empty_like(arr)
+    gpu_arr.set(pinned_host)
+    return gpu_arr
+
 def _check_gpu_memory(required_bytes):
     """
     Check if the requested allocation exceeds available VRAM.
@@ -33,6 +47,14 @@ def _check_gpu_memory(required_bytes):
     except cp.cuda.runtime.CUDARuntimeError:
         pass
 
+def _pad_for_tensor_cores(X_b):
+    """Pads feature dimensions to a multiple of 16 to trigger TF32 hardware."""
+    samples, features = X_b.shape
+    alignment = 16
+    pad_size = (alignment - (features % alignment)) % alignment
+    if pad_size > 0:
+        X_b = cp.pad(X_b, ((0, 0), (0, pad_size)), mode='constant')
+    return X_b, features + pad_size
 
 class LinearRegression:
     """
@@ -55,33 +77,36 @@ class LinearRegression:
 
     def fit(self, X, y):
         """Fit the model on GPU using Cholesky-based Normal Equation."""
-        # Move directly to GPU to avoid CPU memory bottleneck
-        X_gpu_raw = cp.asarray(X, dtype=cp.float32)
-        y_gpu_raw = cp.asarray(y, dtype=cp.float32).ravel()
+        # Move directly to GPU using fast pinned-memory streams
+        X_gpu_raw = _to_gpu_fast(X)
+        y_gpu_raw = _to_gpu_fast(y).ravel()
 
         # Augment with intercept column on GPU
         ones = cp.ones((X_gpu_raw.shape[0], 1), dtype=cp.float32)
         X_b = cp.ascontiguousarray(cp.hstack([X_gpu_raw, ones]))
 
-        samples, features = X_b.shape
+        X_b_padded, features_padded = _pad_for_tensor_cores(X_b)
+        samples = X_b_padded.shape[0]
         
         # Guard: check memory before moving to GPU
-        # X: (samples, features) * 4 bytes, y: (samples) * 4 bytes, theta: features * 4 bytes
-        required_mem = samples * features * 4 + samples * 4 + features * 4
+        required_mem = samples * features_padded * 4 + samples * 4 + features_padded * 4
         _check_gpu_memory(required_mem)
 
-        X_gpu_ptr, X_gpu = _safe_ptr(X_b)
+        X_gpu_ptr, X_gpu = _safe_ptr(X_b_padded)
         y_gpu_ptr, y_gpu = _safe_ptr(y_gpu_raw)
-        theta_gpu_ptr, theta_gpu = _safe_ptr(cp.empty(features, dtype=cp.float32))
+        theta_gpu_ptr, theta_gpu = _safe_ptr(cp.empty(features_padded, dtype=cp.float32))
 
         rusty_machine.solve_normal_equation_device(
             X_gpu_ptr, y_gpu_ptr, theta_gpu_ptr,
-            samples, features, self.alpha,
+            samples, features_padded, self.alpha,
         )
 
         theta_host = theta_gpu.get()
-        self.intercept_ = float(theta_host[-1])
-        self.coef_ = theta_host[:-1]
+        features_orig = X_b.shape[1]
+        theta_host_unpadded = theta_host[:features_orig]
+
+        self.intercept_ = float(theta_host_unpadded[-1])
+        self.coef_ = theta_host_unpadded[:-1]
         self._coef_gpu = cp.asarray(self.coef_)
         return self
 
@@ -90,7 +115,7 @@ class LinearRegression:
         if self.coef_ is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
-        X_gpu_raw = cp.asarray(X, dtype=cp.float32)
+        X_gpu_raw = _to_gpu_fast(X)
         samples, features = X_gpu_raw.shape
         out_gpu = cp.empty(samples, dtype=cp.float32)
 
@@ -154,45 +179,50 @@ class LogisticRegression:
         """Fit the model on GPU using mini-batch SGD with momentum."""
         if self.random_state is not None:
             np.random.seed(self.random_state)
+            cp.random.seed(self.random_state)
 
-        # Immediately transfer to GPU to eliminate Host-RAM bottlenecks
-        X_gpu_raw = cp.asarray(X, dtype=cp.float32)
-        y_gpu_raw = cp.asarray(y, dtype=cp.float32).ravel()
+        # Immediately transfer to GPU via Pinned memory
+        X_gpu_raw = _to_gpu_fast(X)
+        y_gpu_raw = _to_gpu_fast(y).ravel()
 
         # Augment with intercept column on GPU natively
         ones = cp.ones((X_gpu_raw.shape[0], 1), dtype=cp.float32)
         X_b = cp.hstack([X_gpu_raw, ones])
 
-        samples, features = X_b.shape
+        X_b_padded, features_padded = _pad_for_tensor_cores(X_b)
+        samples = X_b_padded.shape[0]
 
         # Shuffle data entirely on GPU VRAM using incredibly high bandwidth
         perm = cp.random.permutation(samples)
-        X_shuffled = cp.ascontiguousarray(X_b[perm])
+        X_shuffled = cp.ascontiguousarray(X_b_padded[perm])
         y_shuffled = cp.ascontiguousarray(y_gpu_raw[perm])
 
         # Guard: check memory before moving to GPU
-        required_mem = samples * features * 4 + samples * 4 + features * 4 * 2 # X, y, theta, velocity
+        required_mem = samples * features_padded * 4 + samples * 4 + features_padded * 4 * 2 # X, y, theta, velocity
         _check_gpu_memory(required_mem)
 
         # We already have contiguous GPU arrays
         X_gpu_ptr, X_gpu = _safe_ptr(X_shuffled)
         y_gpu_ptr, y_gpu = _safe_ptr(y_shuffled)
-        theta_gpu_ptr, theta_gpu = _safe_ptr(cp.zeros(features, dtype=cp.float32))
-        velocity_gpu_ptr, velocity_gpu = _safe_ptr(cp.zeros(features, dtype=cp.float32))
+        theta_gpu_ptr, theta_gpu = _safe_ptr(cp.zeros(features_padded, dtype=cp.float32))
+        velocity_gpu_ptr, velocity_gpu = _safe_ptr(cp.zeros(features_padded, dtype=cp.float32))
 
         penalty_type = 1 if self.penalty == 'l1' else 2
 
         rusty_machine.train_logistic_minibatch_gpu(
             X_gpu_ptr, y_gpu_ptr,
             theta_gpu_ptr, velocity_gpu_ptr,
-            samples, features, self.epochs,
+            samples, features_padded, self.epochs,
             self.lr, self.batch_size, self.alpha,
             penalty_type, self.momentum,
         )
 
         theta_host = theta_gpu.get()
-        self.intercept_ = float(theta_host[-1])
-        self.coef_ = theta_host[:-1]
+        features_orig = X_b.shape[1]
+        theta_host_unpadded = theta_host[:features_orig]
+
+        self.intercept_ = float(theta_host_unpadded[-1])
+        self.coef_ = theta_host_unpadded[:-1]
         self._coef_gpu = cp.asarray(self.coef_)
         return self
 
@@ -201,7 +231,7 @@ class LogisticRegression:
         if self.coef_ is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
-        X_gpu_raw = cp.asarray(X, dtype=cp.float32)
+        X_gpu_raw = _to_gpu_fast(X)
         samples, features = X_gpu_raw.shape
         out_gpu = cp.empty(samples, dtype=cp.float32)
 

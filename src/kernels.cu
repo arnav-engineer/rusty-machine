@@ -54,11 +54,12 @@ extern "C" __global__ void fused_sigmoid_sub(
     int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        float z = fmaxf(-20.0f, fminf(20.0f, logits[idx]));
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float z = fmaxf(-20.0f, fminf(20.0f, logits[i]));
         // Use fast-math intrinsic __expf and __fdividef
         float sigmoid = __fdividef(1.0f, 1.0f + __expf(-z));
-        output[idx] = sigmoid - y_true[idx];
+        output[i] = sigmoid - y_true[i];
     }
 }
 
@@ -72,8 +73,9 @@ extern "C" __global__ void add_regularization_term(
     int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n - 1) {
-        matrix[idx * n + idx] += alpha;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n - 1; i += stride) {
+        matrix[i * n + i] += alpha;
     }
 }
 
@@ -94,18 +96,19 @@ extern "C" __global__ void l2_regularized_update(
     int batch_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < features) {
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < features; i += stride) {
         float inv_batch_size = __fdividef(1.0f, (float)batch_size);
-        float grad_component = grad[idx] * inv_batch_size;
+        float grad_component = grad[i] * inv_batch_size;
 
         float reg_component = 0.0f;
-        if (idx < features - 1) {
-            reg_component = alpha_reg * inv_batch_size * theta[idx];
+        if (i < features - 1) {
+            reg_component = alpha_reg * inv_batch_size * theta[i];
         }
 
-        float v = momentum * velocity[idx] + grad_component + reg_component;
-        velocity[idx] = v;
-        theta[idx] -= lr * v;
+        float v = momentum * velocity[i] + grad_component + reg_component;
+        velocity[i] = v;
+        theta[i] -= lr * v;
     }
 }
 
@@ -126,26 +129,27 @@ extern "C" __global__ void l1_regularized_update(
     int batch_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < features) {
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < features; i += stride) {
         float inv_batch_size = __fdividef(1.0f, (float)batch_size);
-        float grad_component = grad[idx] * inv_batch_size;
+        float grad_component = grad[i] * inv_batch_size;
 
-        float v = momentum * velocity[idx] + grad_component;
-        velocity[idx] = v;
+        float v = momentum * velocity[i] + grad_component;
+        velocity[i] = v;
 
-        float theta_new = theta[idx] - lr * v;
+        float theta_new = theta[i] - lr * v;
 
-        if (idx < features - 1) {
+        if (i < features - 1) {
             float threshold = lr * alpha_reg * inv_batch_size;
             if (theta_new > threshold) {
-                theta[idx] = theta_new - threshold;
+                theta[i] = theta_new - threshold;
             } else if (theta_new < -threshold) {
-                theta[idx] = theta_new + threshold;
+                theta[i] = theta_new + threshold;
             } else {
-                theta[idx] = 0.0f;
+                theta[i] = 0.0f;
             }
         } else {
-            theta[idx] = theta_new;
+            theta[i] = theta_new;
         }
     }
 }
@@ -159,9 +163,10 @@ extern "C" __global__ void sigmoid_transform(
     int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        float z = fmaxf(-20.0f, fminf(20.0f, data[idx]));
-        data[idx] = __fdividef(1.0f, 1.0f + __expf(-z));
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float z = fmaxf(-20.0f, fminf(20.0f, data[i]));
+        data[i] = __fdividef(1.0f, 1.0f + __expf(-z));
     }
 }
 
@@ -174,7 +179,8 @@ extern "C" __global__ void bias_add(
     int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        output[idx] += bias;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        output[i] += bias;
     }
 }
