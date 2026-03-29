@@ -70,12 +70,15 @@ extern "C" __global__ void fused_sigmoid_sub(
 extern "C" __global__ void add_regularization_term(
     float* __restrict__ matrix,
     float alpha,
-    int n
+    int n,
+    int intercept_idx
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
-    for (int i = idx; i < n - 1; i += stride) {
-        matrix[i * n + i] += alpha;
+    for (int i = idx; i < n; i += stride) {
+        if (i != intercept_idx) {
+            matrix[i * n + i] += alpha;
+        }
     }
 }
 
@@ -93,7 +96,8 @@ extern "C" __global__ void l2_regularized_update(
     float alpha_reg,
     float momentum,
     int features,
-    int batch_size
+    int batch_size,
+    int intercept_idx
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -102,7 +106,7 @@ extern "C" __global__ void l2_regularized_update(
         float grad_component = grad[i] * inv_batch_size;
 
         float reg_component = 0.0f;
-        if (i < features - 1) {
+        if (i != intercept_idx) {
             reg_component = alpha_reg * inv_batch_size * theta[i];
         }
 
@@ -126,7 +130,8 @@ extern "C" __global__ void l1_regularized_update(
     float alpha_reg,
     float momentum,
     int features,
-    int batch_size
+    int batch_size,
+    int intercept_idx
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -139,7 +144,7 @@ extern "C" __global__ void l1_regularized_update(
 
         float theta_new = theta[i] - lr * v;
 
-        if (i < features - 1) {
+        if (i != intercept_idx) {
             float threshold = lr * alpha_reg * inv_batch_size;
             if (theta_new > threshold) {
                 theta[i] = theta_new - threshold;

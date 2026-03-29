@@ -96,13 +96,15 @@ class LinearRegression:
         y_gpu_ptr, y_gpu = _safe_ptr(y_gpu_raw)
         theta_gpu_ptr, theta_gpu = _safe_ptr(cp.empty(features_padded, dtype=cp.float32))
 
+        features_orig = X_b.shape[1]
+        intercept_idx = features_orig - 1
+
         rusty_machine.solve_normal_equation_device(
             X_gpu_ptr, y_gpu_ptr, theta_gpu_ptr,
-            samples, features_padded, self.alpha,
+            samples, features_padded, self.alpha, intercept_idx
         )
 
         theta_host = theta_gpu.get()
-        features_orig = X_b.shape[1]
         theta_host_unpadded = theta_host[:features_orig]
 
         self.intercept_ = float(theta_host_unpadded[-1])
@@ -208,17 +210,19 @@ class LogisticRegression:
         velocity_gpu_ptr, velocity_gpu = _safe_ptr(cp.zeros(features_padded, dtype=cp.float32))
 
         penalty_type = 1 if self.penalty == 'l1' else 2
+        
+        features_orig = X_b.shape[1]
+        intercept_idx = features_orig - 1
 
         rusty_machine.train_logistic_minibatch_gpu(
             X_gpu_ptr, y_gpu_ptr,
             theta_gpu_ptr, velocity_gpu_ptr,
             samples, features_padded, self.epochs,
             self.lr, self.batch_size, self.alpha,
-            penalty_type, self.momentum,
+            penalty_type, self.momentum, intercept_idx
         )
 
         theta_host = theta_gpu.get()
-        features_orig = X_b.shape[1]
         theta_host_unpadded = theta_host[:features_orig]
 
         self.intercept_ = float(theta_host_unpadded[-1])

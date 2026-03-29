@@ -69,6 +69,7 @@ pub fn gpu_inverse(a_ptr: u64, inv_ptr: u64, n: usize) -> PyResult<()> {
 pub fn solve_normal_equation_device(
     x_ptr: u64, y_ptr: u64, theta_ptr: u64,
     samples: usize, features: usize, alpha_reg: f32,
+    intercept_idx: usize
 ) -> PyResult<()> {
     with_gpu_context(|ctx| {
         let one = 1.0f32;
@@ -98,7 +99,7 @@ pub fn solve_normal_equation_device(
             let block = 256u32;
             let grid = (features as u32 + block - 1) / block;
             cust::launch!(add_reg_func<<<grid, block, 0, stream>>>(
-                xtx.as_device_ptr(), effective_alpha, f
+                xtx.as_device_ptr(), effective_alpha, f, intercept_idx as i32
             )).map_err(to_py_err)?;
 
             // 3. Xᵀy → write directly into theta output buffer
@@ -189,7 +190,7 @@ pub fn train_logistic_minibatch_gpu(
     x_ptr: u64, y_ptr: u64, theta_ptr: u64, velocity_ptr: u64,
     samples: usize, features: usize, epochs: usize,
     lr: f32, batch_size: usize, alpha_reg: f32,
-    penalty_type: i32, momentum: f32,
+    penalty_type: i32, momentum: f32, intercept_idx: usize
 ) -> PyResult<()> {
     with_gpu_context(|ctx| {
         let stream = &ctx.stream;
@@ -255,7 +256,7 @@ pub fn train_logistic_minibatch_gpu(
                     cust::launch!(reg_update_f<<<upd_grid, upd_block, 0, stream>>>(
                         theta_dev_ptr, velocity_dev_ptr,
                         grad_dev.as_device_ptr(),
-                        lr, alpha_reg, momentum, f, bs_i32
+                        lr, alpha_reg, momentum, f, bs_i32, intercept_idx as i32
                     )).map_err(to_py_err)?;
                 }
             }
