@@ -154,7 +154,7 @@ with st.sidebar:
         epochs, learning_rate, batch_size = 1, 0.01, 1
 
     st.markdown("<br>", unsafe_allow_html=True)
-    run_button = st.button("Initialize Engine", width=True, type="primary")
+    run_button = st.button("Initialize Engine", use_container_width=True, type="primary")
 
 if not run_button:
     st.markdown("""
@@ -276,11 +276,11 @@ if run_button:
         )
 
     with c1:
-        st.altair_chart(create_luxury_chart("Training Time (s)", "Training Convergence Latency"), width=True)
+        st.altair_chart(create_luxury_chart("Training Time (s)", "Training Convergence Latency"), use_container_width=True)
     with c2:
-        st.altair_chart(create_luxury_chart("Prediction Time (s)", "Inference Latency"), width=True)
+        st.altair_chart(create_luxury_chart("Prediction Time (s)", "Inference Latency"), use_container_width=True)
     with c3:
-         st.altair_chart(create_luxury_chart("Carbon Emissions (g)", "Calculated Carbon Footprint (CO₂e)"), width=True)
+         st.altair_chart(create_luxury_chart("Carbon Emissions (g)", "Calculated Carbon Footprint (CO₂e)"), use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     
