@@ -1,0 +1,77 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{booktabs}
+
+\title{Mathematical Derivations for Rusty-Machine: High-Fidelity ML Primitives on CUDA}
+
+\author{\IEEEauthorblockN{Technical Appendix}}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+This document provides the formal mathematical derivations for the machine learning primitives implemented in the \textit{rusty-machine} framework. We focus on the transition from continuous analytical forms to the discrete, vectorized representations executed on NVIDIA CUDA cores using the cuBLAS and cuSOLVER backends.
+
+\section{Linear Regression and Ordinary Least Squares (OLS)}
+For a linear model $y = X\theta + \epsilon$, where $X \in \mathbb{R}^{N \times D}$ is the feature matrix and $y \in \mathbb{R}^{N \times 1}$ is the target vector, the objective is to minimize the Residual Sum of Squares (RSS):
+\begin{equation}
+J(\theta) = \|y - X\theta\|^2 = (y - X\theta)^T(y - X\theta)
+\end{equation}
+
+\subsection{Analytical Solution (Normal Equation)}
+To find the optimal $\theta$, we set the gradient with respect to $\theta$ to zero:
+\begin{align}
+\nabla_\theta J(\theta) &= \nabla_\theta (y^Ty - 2\theta^TX^Ty + \theta^TX^TX\theta) \\
+&= -2X^Ty + 2X^TX\theta = 0
+\end{align}
+This yields the Normal Equation:
+\begin{equation}
+\theta = (X^TX)^{-1}X^Ty
+\end{equation}
+In \textit{rusty-machine}, this is implemented using \texttt{cuSOLVER}'s Cholesky decomposition ($LL^T$) to solve the linear system for high-dimensional feature spaces.
+
+\section{Logistic Regression and cross-Entropy Loss}
+Logistic regression maps the linear output to a probability space using the sigmoid function $\sigma(z)$:
+\begin{equation}
+h_\theta(x) = \sigma(X\theta) = \frac{1}{1 + e^{-X\theta}}
+\end{equation}
+
+\subsection{Cost Function}
+The objective is to minimize the Binary Cross Entropy (BCE) loss:
+\begin{equation}
+J(\theta) = -\frac{1}{N} \sum_{i=1}^N [y_i \log(h_\theta(x_i)) + (1-y_i) \log(1-h_\theta(x_i))]
+\end{equation}
+
+\subsection{Gradient Derivation}
+The derivative of the sigmoid function is $\sigma'(z) = \sigma(z)(1-\sigma(z))$. Using the chain rule:
+\begin{align}
+\frac{\partial J}{\partial \theta_j} &= \frac{1}{N} \sum_{i=1}^N (h_\theta(x_i) - y_i)x_{ij} \\
+\nabla_\theta J(\theta) &= \frac{1}{N} X^T (\sigma(X\theta) - y)
+\end{align}
+In \textit{rusty-machine}, the term $X\theta$ is computed via \texttt{cuBLAS SGEMV}, and the element-wise sigmoid and subtraction are handled by custom PTX kernels to maintain zero-copy integrity.
+
+\section{Momentum-Based Optimization}
+To accelerate convergence, we implement a velocity-based momentum update. Let $g_t = \nabla_\theta J(\theta_t)$ be the gradient at step $t$:
+\begin{align}
+v_{t+1} &= \mu v_t + \eta g_t \\
+\theta_{t+1} &= \theta_t - v_{t+1}
+\end{align}
+where $\mu \in [0, 1]$ is the momentum coefficient (typically 0.9) and $\eta$ is the learning rate.
+
+On CUDA architectures, these updates are captured within a \textit{CUDA Graph} to eliminate the Host-Device launch latency of individual vector additions ($v + g$) and subtractions ($\theta - v$).
+
+\section{Memory Lifecycle Mathematics}
+The zero-copy mechanism relies on affine pointer mappings. Given a host-resident pointer $P_h$ and its corresponding device-resident allocation $P_d$:
+\begin{equation}
+P_d = \text{cudaMalloc}(Size(X))
+\end{equation}
+In Rust, the lifetime $\mathcal{L}$ of $P_d$ is strictly bound such that:
+\begin{equation}
+\forall t \in [t_{start}, t_{end}], \text{Ownership}(P_d) \in \text{RustBorrowChecker}
+\end{equation}
+This ensures that the raw memory address $P_d$ passed to the CUDA Stream remains immutable for the duration of the PTX execution cycle.
+
+\end{document}
