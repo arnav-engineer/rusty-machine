@@ -1,0 +1,15 @@
+[package]
+name = "rusty_machine"
+version = "0.2.0"
+edition = "2021"
+description = "GPU-accelerated machine learning in Rust with Python bindings, powered by CUDA"
+license = "MIT"
+authors = ["Arnav Gupta <arnav.gupta.9404@gmail.com>"]
+
+[lib]
+name = "rusty_machine"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.25.1", features = ["extension-module"] }
+cust = "0.3.2"
