@@ -28,3 +28,6 @@ venv/
 .states
 assets/
 documents/
+temp_cuda/
+emissions_*.csv
+
